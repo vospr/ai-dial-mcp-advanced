@@ -526,6 +526,262 @@ def get_user_cached(user_id: int):
 - Manual session lifecycle
 - Error code meanings
 
+### Implementation Insights from Completed Code
+
+#### 1. Session Lifecycle Management
+
+**Key Pattern:**
+```python
+class MCPSession:
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.ready_for_operation = False  # Set to True after notifications/initialized
+        self.created_at = asyncio.get_event_loop().time()
+        self.last_activity = self.created_at
+```
+
+**Critical State Transitions:**
+1. **Created** (after initialize) → `ready_for_operation = False`
+2. **Ready** (after notifications/initialized) → `ready_for_operation = True`
+3. **Active** (on each request) → Update `last_activity` timestamp
+
+**Why Two-Phase Init?**
+- `initialize`: Server creates session, returns capabilities
+- `notifications/initialized`: Client confirms it's ready, server marks session operational
+- Prevents premature tool calls before client setup complete
+
+#### 2. SSE Streaming Implementation
+
+**Server Side (FastAPI):**
+```python
+async def _create_sse_stream(messages: list):
+    for message in messages:
+        event_data = f"data: {json.dumps(message.dict(exclude_none=True))}\n\n"
+        yield event_data.encode('utf-8')
+    yield b"data: [DONE]\n\n"
+```
+
+**Client Side (aiohttp):**
+```python
+async def _parse_sse_response_streaming(self, response):
+    async for line in response.content:
+        line_str = line.decode('utf-8').strip()
+        if line_str.startswith('data: '):
+            data_part = line_str[6:].strip()
+            if data_part == '[DONE]':
+                break
+            return json.loads(data_part)
+```
+
+**Key Insight:** SSE format requires:
+- `data: ` prefix for each line
+- `\n\n` line separator
+- `[DONE]` marker for stream end
+- Client must parse line-by-line asynchronously
+
+#### 3. Tool Result Format
+
+**MCP Content Protocol:**
+```python
+{
+    "content": [
+        {
+            "type": "text",
+            "text": "actual result string"
+        }
+    ]
+}
+```
+
+**Why Not Just String?**
+- Extensibility: Future support for images, files, structured data
+- Consistency: All MCP responses use same format
+- Type Safety: Client knows what to expect
+
+**OpenAI Function Calling Conversion:**
+```python
+# MCP tool schema → OpenAI function format
+{
+    "type": "function",
+    "function": {
+        "name": tool["name"],
+        "description": tool["description"],
+        "parameters": tool["inputSchema"]  # JSON Schema
+    }
+}
+```
+
+#### 4. Error Handling Strategy
+
+**Three-Level Error Handling:**
+
+**Level 1: HTTP Status Codes**
+```python
+# Missing Accept header
+return Response(status_code=406, content=error_json)
+
+# Invalid session
+return Response(status_code=400, content=error_json)
+
+# Notification accepted
+return Response(status_code=202)  # No body
+```
+
+**Level 2: JSON-RPC Errors**
+```python
+MCPResponse(
+    id=request.id,
+    error=ErrorResponse(
+        code=-32602,  # Invalid params
+        message="Missing required parameter: name"
+    )
+)
+```
+
+**Level 3: Tool Execution Errors**
+```python
+# Soft error: Return as content with isError flag
+{
+    "content": [
+        {"type": "text", "text": f"Tool execution error: {str(e)}"}
+    ],
+    "isError": True
+}
+```
+
+**Why Three Levels?**
+- HTTP: Transport/protocol errors (server-level)
+- JSON-RPC: Request format errors (protocol-level)
+- Tool: Business logic errors (application-level)
+
+#### 5. Header Validation Pattern
+
+**Critical Headers:**
+```python
+def _validate_accept_header(accept: str) -> bool:
+    accept_types = [t.strip().lower() for t in accept.split(',')]
+    has_json = any('application/json' in t for t in accept_types)
+    has_sse = any('text/event-stream' in t for t in accept_types)
+    return has_json and has_sse
+```
+
+**Why Both?**
+- `application/json`: Initial request/response
+- `text/event-stream`: Streaming responses
+- Server must support both for MCP compliance
+
+#### 6. Async Context Manager Pattern
+
+**Client Implementation:**
+```python
+class CustomMCPClient:
+    @classmethod
+    async def create(cls, url: str) -> 'CustomMCPClient':
+        instance = cls(url)
+        await instance.connect()  # Initialize + notify
+        return instance
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.http_session:
+            await self.http_session.close()
+```
+
+**Usage:**
+```python
+async with CustomMCPClient.create(url) as client:
+    tools = await client.get_tools()
+    result = await client.call_tool("get_user", {"id": 1})
+```
+
+**Benefits:**
+- Automatic connection setup
+- Guaranteed cleanup
+- Exception-safe resource management
+
+#### 7. UUID Session ID Format
+
+**Implementation Detail:**
+```python
+session_id = str(uuid.uuid4()).replace("-", "")
+# Example: "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+```
+
+**Why Remove Dashes?**
+- Shorter (32 vs 36 characters)
+- HTTP header friendly (no special chars)
+- Still globally unique
+- Easier to copy/paste in Postman
+
+#### 8. Tool Registry Pattern Benefits
+
+**Centralized Registration:**
+```python
+def _register_tools(self):
+    user_client = UserClient()
+    for tool in [
+        GetUserByIdTool(user_client),
+        SearchUsersTool(user_client),
+        CreateUserTool(user_client),
+        UpdateUserTool(user_client),
+        DeleteUserTool(user_client),
+    ]:
+        self.tools[tool.name] = tool
+```
+
+**Advantages:**
+- Single source of truth
+- Easy to add/remove tools
+- Shared user_client instance
+- Type-safe tool access
+
+#### 9. Pydantic Integration
+
+**Tool Schema from Pydantic:**
+```python
+class UserCreate(BaseModel):
+    name: str
+    surname: str
+    email: str
+    gender: str
+    about_me: str = ""
+
+class CreateUserTool:
+    @property
+    def input_schema(self) -> dict:
+        return UserCreate.model_json_schema()  # Auto-generates JSON Schema
+```
+
+**Benefits:**
+- Automatic validation
+- JSON Schema generation
+- Type hints
+- Documentation in schema
+
+#### 10. Multi-Client Architecture
+
+**Agent Design:**
+```python
+# Collect tools from multiple MCP servers
+ums_mcp_client = await MCPClient.create("http://localhost:8006/mcp")
+fetch_mcp_client = await CustomMCPClient.create("https://remote.mcpservers.org/fetch/mcp")
+
+tools = []
+tool_name_client_map = {}
+
+for client in [ums_mcp_client, fetch_mcp_client]:
+    for tool in await client.get_tools():
+        tools.append(tool)
+        tool_name_client_map[tool['function']['name']] = client
+```
+
+**Why Map Tools to Clients?**
+- Route tool calls to correct server
+- Support multiple MCP servers simultaneously
+- Enable tool federation/composition
+
 ### Production Readiness Gap
 
 **Current Implementation:**
