@@ -62,7 +62,53 @@ export DIAL_API_KEY="your_dial_api_key_here"
 python agent/app.py
 ```
 
-### Step 5: Stop Services
+### Step 5: Run Automated Tests
+
+```bash
+# In third WSL terminal (or after stopping agent)
+cd /mnt/c/Users/AndreyPopov/ai-dial-mcp-advanced
+source .venv/bin/activate
+export DIAL_API_KEY="your_dial_api_key_here"
+python test.py
+```
+
+**What the test suite does:**
+1. ✅ Checks if Docker user service is running
+2. ✅ Checks if MCP server is running
+3. ✅ Verifies DIAL API key is set
+4. ✅ Tests MCPClient (library-based)
+5. ✅ Tests CustomMCPClient (pure Python)
+6. ✅ Tests full agent with query: "Check if Arkadiy Dobkin present, if not add him"
+
+**Expected Output:**
+```
+🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯
+ADVANCED MCP - COMPREHENSIVE TEST SUITE
+🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯
+
+SERVICE HEALTH CHECK
+✅ User service is running
+✅ MCP server is running
+✅ DIAL_API_KEY is set
+
+TEST 1: MCP CLIENT (Library-based)
+✅ MCPClient test PASSED
+
+TEST 2: CUSTOM MCP CLIENT (Pure Python)
+✅ CustomMCPClient test PASSED
+
+TEST 3: FULL AGENT WITH REAL QUERY
+✅ Agent test PASSED
+
+TEST SUMMARY
+MCPClient (Library)                     ✅ PASSED
+CustomMCPClient (Pure Python)           ✅ PASSED
+Full Agent with Query                   ✅ PASSED
+
+🎉 All tests PASSED! Ready to commit and push to GitHub.
+```
+
+### Step 6: Stop Services
 
 ```bash
 # Stop Docker user service
